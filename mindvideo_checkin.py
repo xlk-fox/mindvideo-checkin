@@ -147,6 +147,21 @@ def detect_cloudflare(page):
     return False
 
 
+def dump_checkin_texts(page, tag):
+    """打印页面上所有与签到相关的短文案，便于判断签到是否真正生效。"""
+    try:
+        vals = page.evaluate(
+            "() => { const ks=['签到','领取','已签']; const out=[];"
+            "document.querySelectorAll('*').forEach(e=>{ if(e.children.length===0){"
+            "const t=(e.textContent||'').trim();"
+            "if(t && t.length<30 && ks.some(k=>t.includes(k))) out.push(t);} });"
+            "return [...new Set(out)].slice(0,20); }"
+        )
+        log(f"{tag} 签到相关文案: {vals}")
+    except Exception as e:
+        log(f"{tag} 取文案失败: {e}")
+
+
 def find_and_click_checkin(page):
     def js_click(locator):
         # 用真实 DOM click 绕过遮挡层/动画导致的 Playwright 可见性拦截
@@ -180,7 +195,11 @@ def find_and_click_checkin(page):
                 box = target.bounding_box(timeout=3000)
                 if not box:
                     continue
-                log(f"找到疑似签到元素，文案含「{kw}」，尝试点击")
+                try:
+                    tgt_txt = (target.inner_text(timeout=2000) or "").strip()
+                except Exception:
+                    tgt_txt = ""
+                log(f"找到疑似签到元素，文案含「{kw}」，元素全文=「{tgt_txt}」")
                 ok = False
                 try:
                     target.click(timeout=6000, force=True)
@@ -189,6 +208,8 @@ def find_and_click_checkin(page):
                     if js_click(target):
                         ok = True
                 if ok:
+                    time.sleep(2)
+                    dump_checkin_texts(page, "点击后+2s")
                     return kw
             except Exception:
                 continue
@@ -234,6 +255,18 @@ def main():
         )
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
         page = context.new_page()
+
+        api_hits = []
+
+        def _on_resp(resp):
+            try:
+                u = resp.url.lower()
+                if any(k in u for k in ("checkin", "claim", "daily", "point", "credit")):
+                    api_hits.append(f"{resp.status} {resp.url[:120]}")
+            except Exception:
+                pass
+
+        page.on("response", _on_resp)
 
         # 1) 先注入 cookie
         if cookie_str:
@@ -298,6 +331,8 @@ def main():
 
         log(f"已点击签到元素（文案含「{clicked}」），等待结果…")
         time.sleep(5)
+        dump_checkin_texts(page, "点击后+5s")
+        log(f"捕获到的相关接口请求: {api_hits[-12:]}")
 
         if verify_success(page):
             result = "✅ 签到成功（检测到成功提示）"
