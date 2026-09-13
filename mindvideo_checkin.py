@@ -341,9 +341,12 @@ def main():
 
         page.on("response", _on_resp)
 
-        # 1) 先注入 cookie
-        if cookie_str:
-            log("注入 cookie 恢复登录态")
+        # 1) 默认不注入持久 cookie：
+        #    实测注入的旧 token 会与新登录态冲突，导致页面仍显示「登录」；
+        #    而账号密码 UI 登录在云端稳定可用，因此直接走登录。
+        #    如确需用 cookie，设置环境变量 MV_USE_COOKIE=1 即可。
+        if cookie_str and os.environ.get("MV_USE_COOKIE") == "1":
+            log("注入 cookie 恢复登录态（MV_USE_COOKIE=1）")
             try:
                 context.add_cookies(parse_cookies(cookie_str))
             except Exception as e:
