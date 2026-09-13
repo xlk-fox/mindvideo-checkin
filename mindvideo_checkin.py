@@ -386,13 +386,22 @@ def main():
                 page.goto(BASE + r, timeout=20000, wait_until="domcontentloaded")
             except Exception:
                 pass
-            time.sleep(5)
-            try:
-                body = page.inner_text("body")
-            except Exception:
-                body = ""
-            log(f"=== 当前路由 {page.url} 含签到入口={'签到并领取' in body} ===")
-            if "签到并领取" not in body:
+            # 云端 React 渲染较慢：轮询等待「签到并领取」入口出现（最多 ~30s）
+            found = False
+            body = ""
+            rounds = 0
+            for rounds in range(1, 16):
+                time.sleep(2)
+                try:
+                    body = page.inner_text("body")
+                except Exception:
+                    body = ""
+                if "签到并领取" in body:
+                    found = True
+                    break
+            log(f"=== 路由 {page.url} 含签到入口={found}（等待 {rounds} 轮）===")
+            if not found:
+                log(f"路由 {r or '/'} 页面文本: {body[:200].replace(chr(10), ' | ')}")
                 continue
             outcome = find_and_click_checkin(page)
             if outcome:
