@@ -78,13 +78,23 @@ def parse_cookies(cookie_str):
 
 
 def is_logged_in(page):
-    """是否已登录：MindVideo 登录后顶部不再显示「免费登录」。"""
+    """是否已登录：等页面渲染出登录入口或账户入口再判断，避免 React 未渲染导致的误判。"""
+    try:
+        page.wait_for_function(
+            "() => { const t = document.body ? document.body.innerText : ''; "
+            "return t.includes('免费登录') || t.includes('Sign in') || t.includes('退出') "
+            "|| t.includes('我的') || t.includes('签到'); }",
+            timeout=8000,
+        )
+    except Exception:
+        pass
     try:
         txt = page.inner_text("body")
     except Exception:
         return False
     if "免费登录" in txt or "Sign in" in txt:
         return False
+    # 出现「签到」(登录后才有) 或「退出」等账户元素 → 视为已登录
     return True
 
 
@@ -138,19 +148,33 @@ def detect_cloudflare(page):
 
 
 def find_and_click_checkin(page):
-    for kw in CHECKIN_KEYWORDS:
-        try:
-            loc = page.get_by_text(kw, exact=False).first
-            if loc.count() == 0:
+    # 轮询最多 ~30s，给页面/动画留出渲染时间
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        for kw in CHECKIN_KEYWORDS:
+            try:
+                loc = page.locator(f"text={kw}").first
+                if loc.count() == 0:
+                    continue
+                # 找到最近的可点击祖先：button / a / 带 onclick / cursor-pointer / role=button
+                clickable = loc.locator(
+                    "xpath=ancestor-or-self::*[self::button or self::a or @onclick "
+                    "or contains(@class,'cursor-pointer') or @role='button']"
+                ).first
+                target = clickable if clickable.count() else loc
+                try:
+                    target.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                box = target.bounding_box(timeout=3000)
+                if not box:
+                    continue
+                log(f"找到疑似签到元素，文案含「{kw}」，尝试点击")
+                target.click(timeout=6000)
+                return kw
+            except Exception:
                 continue
-            box = loc.bounding_box(timeout=2000)
-            if not box:
-                continue
-            log(f"找到疑似签到元素，文案含「{kw}」，尝试点击")
-            loc.click(timeout=6000)
-            return kw
-        except Exception:
-            continue
+        time.sleep(2)
     return None
 
 
