@@ -148,8 +148,19 @@ def detect_cloudflare(page):
 
 
 def find_and_click_checkin(page):
-    # 轮询最多 ~30s，给页面/动画留出渲染时间
-    deadline = time.time() + 30
+    def js_click(locator):
+        # 用真实 DOM click 绕过遮挡层/动画导致的 Playwright 可见性拦截
+        try:
+            h = locator.element_handle(timeout=3000)
+            if h:
+                page.evaluate("el => el.click()", h)
+                return True
+        except Exception:
+            pass
+        return False
+
+    # 轮询最多 ~40s，给页面/动画留出渲染时间
+    deadline = time.time() + 40
     while time.time() < deadline:
         for kw in CHECKIN_KEYWORDS:
             try:
@@ -170,11 +181,18 @@ def find_and_click_checkin(page):
                 if not box:
                     continue
                 log(f"找到疑似签到元素，文案含「{kw}」，尝试点击")
-                target.click(timeout=6000)
-                return kw
+                ok = False
+                try:
+                    target.click(timeout=6000, force=True)
+                    ok = True
+                except Exception:
+                    if js_click(target):
+                        ok = True
+                if ok:
+                    return kw
             except Exception:
                 continue
-        time.sleep(2)
+        time.sleep(1)
     return None
 
 
