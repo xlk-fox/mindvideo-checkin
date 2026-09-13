@@ -145,16 +145,29 @@ def try_ui_login(page, context, email, password):
     except Exception as e:
         log(f"填表失败: {e}")
         return False
-    # 提交
+    # 提交：精确匹配「登录」文案，避免误点到「使用 Google 登录」
+    submitted = False
     try:
-        page.locator('button[type="submit"], button:has-text("登")').first.click(timeout=8000)
-        log("已点击登录按钮")
+        submitted = bool(page.evaluate(
+            "() => { const norm = s => (s||'').replace(/\\s+/g,'');"
+            "const b = [...document.querySelectorAll('button')]"
+            ".find(x => ['登录','Signin','Login','Log in'].includes(norm(x.textContent)));"
+            "if (b) { b.click(); return true; } return false; }"
+        ))
     except Exception as e:
-        log(f"点登录按钮失败，改用回车: {e}")
+        log(f"精确匹配登录按钮异常: {e}")
+    if submitted:
+        log("已点击登录按钮（精确匹配）")
+    else:
         try:
-            page.keyboard.press("Enter")
-        except Exception:
-            return False
+            page.locator('button[type="submit"]').first.click(timeout=8000)
+            log("已点击登录按钮（submit 兜底）")
+        except Exception as e:
+            log(f"点登录按钮失败，改用回车: {e}")
+            try:
+                page.keyboard.press("Enter")
+            except Exception:
+                return False
     # 等待 token 出现
     for i in range(6):
         time.sleep(3)
@@ -340,6 +353,15 @@ def main():
                 pass
 
         page.on("response", _on_resp)
+
+        # 固定中文界面：英文界面下按钮/输入框文案不同，会导致登录步骤失配
+        try:
+            context.add_cookies([{
+                "name": "i18next", "value": "zh",
+                "domain": ".mindvideo.ai", "path": "/",
+            }])
+        except Exception as e:
+            log(f"设置语言 cookie 失败: {e}")
 
         # 1) 默认不注入持久 cookie：
         #    实测注入的旧 token 会与新登录态冲突，导致页面仍显示「登录」；
