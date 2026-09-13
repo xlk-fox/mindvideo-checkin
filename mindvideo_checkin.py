@@ -175,16 +175,19 @@ def detect_cloudflare(page):
 
 
 def dump_checkin_texts(page, tag):
-    """打印页面上所有与签到相关的短文案，便于判断签到是否真正生效。"""
+    """列出页面上所有含「签到」相关字样的元素（含是否可见），用于定位真正的签到按钮。"""
     try:
         vals = page.evaluate(
             "() => { const ks=['签到','领取','已签']; const out=[];"
-            "document.querySelectorAll('*').forEach(e=>{ if(e.children.length===0){"
-            "const t=(e.textContent||'').trim();"
-            "if(t && t.length<30 && ks.some(k=>t.includes(k))) out.push(t);} });"
-            "return [...new Set(out)].slice(0,20); }"
+            "document.querySelectorAll('*').forEach(e=>{"
+            "const t=(e.textContent||'').trim().replace(/\\s+/g,' ');"
+            "if(t && t.length<40 && ks.some(k=>t.includes(k))){"
+            "const r=e.getBoundingClientRect();"
+            "out.push({t:t, vis:(r.width>0&&r.height>0), tag:e.tagName,"
+            "cls:(e.className||'').toString().slice(0,50), onclk:!!e.getAttribute('onclick')});} });"
+            "return out.slice(0,25); }"
         )
-        log(f"{tag} 签到相关文案: {vals}")
+        log(f"{tag} 含量: {vals}")
     except Exception as e:
         log(f"{tag} 取文案失败: {e}")
 
@@ -312,8 +315,7 @@ def main():
 
         # 2) 打开首页
         try:
-            page.goto(BASE, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=10000)
+            page.goto(BASE, timeout=30000, wait_until="domcontentloaded")
         except Exception as e:
             log(f"首页加载异常: {e}")
 
@@ -345,11 +347,12 @@ def main():
         routes = ["", "/user", "/member", "/points", "/checkin", "/daily", "/account", "/vip"]
         for r in routes:
             try:
-                page.goto(BASE + r, timeout=20000)
-                page.wait_for_load_state("networkidle", timeout=8000)
+                page.goto(BASE + r, timeout=20000, wait_until="domcontentloaded")
             except Exception:
                 pass
-            time.sleep(2)
+            time.sleep(3)
+            log(f"=== 当前路由 {page.url} ===")
+            dump_checkin_texts(page, f"路由{r or '/'}")
             clicked = find_and_click_checkin(page)
             if clicked:
                 break
