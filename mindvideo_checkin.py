@@ -16,6 +16,7 @@ MindVideo.ai 每日自动签到 (Playwright 浏览器自动化)
 """
 
 import os
+import re
 import sys
 import time
 
@@ -192,66 +193,101 @@ def dump_checkin_texts(page, tag):
         log(f"{tag} 取文案失败: {e}")
 
 
-def find_and_click_checkin(page):
-    def js_click(locator):
-        # 用真实 DOM click 绕过遮挡层/动画导致的 Playwright 可见性拦截
-        try:
-            h = locator.element_handle(timeout=3000)
-            if h:
-                page.evaluate("el => el.click()", h)
-                return True
-        except Exception:
-            pass
-        return False
+def dump_clickables(page, tag):
+    """列出页面上所有可见的可点击元素文案，用于找签到入口。"""
+    try:
+        vals = page.evaluate(
+            "() => { const out=[];"
+            "document.querySelectorAll('button,a,[onclick],[role=button],[class*=cursor-pointer]').forEach(e=>{"
+            "const t=(e.innerText||e.textContent||'').trim().replace(/\\s+/g,' ');"
+            "const r=e.getBoundingClientRect();"
+            "if(t && t.length<30 && r.width>0 && r.height>0) out.push(t); });"
+            "return [...new Set(out)].slice(0,60); }"
+        )
+        log(f"{tag} 可见可点击: {vals}")
+    except Exception as e:
+        log(f"{tag} dump_clickables 失败: {e}")
 
-    # 轮询最多 ~40s，给页面/动画留出渲染时间
-    deadline = time.time() + 40
-    while time.time() < deadline:
-        for kw in CHECKIN_KEYWORDS:
-            try:
-                loc = page.locator(f"text={kw}").first
-                if loc.count() == 0:
-                    continue
-                # 找到最近的可点击祖先：button / a / 带 onclick / cursor-pointer / role=button
-                clickable = loc.locator(
-                    "xpath=ancestor-or-self::*[self::button or self::a or @onclick "
-                    "or contains(@class,'cursor-pointer') or @role='button']"
-                ).first
-                target = clickable if clickable.count() else loc
-                try:
-                    target.scroll_into_view_if_needed()
-                except Exception:
-                    pass
-                box = target.bounding_box(timeout=3000)
-                if not box:
-                    continue
-                try:
-                    tgt_txt = (target.inner_text(timeout=2000) or "").strip()
-                except Exception:
-                    tgt_txt = ""
-                try:
-                    outer = target.evaluate("el => el.outerHTML.slice(0, 240)")
-                except Exception:
-                    outer = ""
-                log(f"找到疑似签到元素，文案含「{kw}」，元素全文=「{tgt_txt}」，outerHTML={outer}")
-                if not tgt_txt:
-                    log("元素文本为空（多半是隐藏元素/模板文本），跳过")
-                    continue
-                ok = False
-                try:
-                    target.click(timeout=6000, force=True)
-                    ok = True
-                except Exception:
-                    if js_click(target):
-                        ok = True
-                if ok:
-                    time.sleep(2)
-                    dump_checkin_texts(page, "点击后+2s")
-                    return kw
-            except Exception:
+
+def get_credits(page):
+    """读取导航栏上的积分数字（形如「22Free」）。"""
+    try:
+        m = re.search(r"(\d+)\s*Free", page.inner_text("body")[:400])
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+PANEL_BTN_JS = (
+    "() => { const norm = s => (s||'').replace(/\\s+/g,'');"
+    "return [...document.querySelectorAll('button, [class*=cursor-pointer]')]"
+    ".filter(b => norm(b.textContent) === '签到' && b.getBoundingClientRect().width > 0).length; }"
+)
+
+
+def find_and_click_checkin(page):
+    """签到两步走：① 点导航栏「签到并领取」打开签到面板 ② 点面板内的「签到」按钮。
+    返回形如 "success|说明" / "already|说明" / "failed|说明"，找不到入口返回 None。
+    """
+    before = get_credits(page)
+    log(f"签到前积分: {before}")
+
+    # ① 打开签到面板
+    opened = False
+    for kw in ("签到并领取", "每日签到", "立即签到"):
+        try:
+            loc = page.locator(f"text={kw}").first
+            if loc.count() == 0:
                 continue
-        time.sleep(1)
-    return None
+            handle = loc.element_handle(timeout=3000)
+            if not handle:
+                continue
+            page.evaluate("el => el.click()", handle)
+            log(f"已点击「{kw}」，尝试打开签到面板")
+            opened = True
+            break
+        except Exception:
+            continue
+    if not opened:
+        log("未找到签到入口")
+        return None
+
+    # ② 点面板内的「签到」按钮
+    clicked_panel = False
+    for i in range(8):
+        time.sleep(2)
+        try:
+            r = page.evaluate(
+                "() => { const norm = s => (s||'').replace(/\\s+/g,'');"
+                "const bs = [...document.querySelectorAll('button, [class*=cursor-pointer]')]"
+                ".filter(b => norm(b.textContent) === '签到' && b.getBoundingClientRect().width > 0);"
+                "if (bs.length) { bs[0].click(); return 'clicked'; } return 'none'; }"
+            )
+        except Exception as e:
+            r = f"error:{e}"
+        if r == "clicked":
+            log(f"已点击签到面板内的「签到」按钮（第 {i + 1} 次尝试）")
+            clicked_panel = True
+            break
+        log(f"面板内暂未出现可点的「签到」按钮（{r}）")
+
+    time.sleep(5)
+    after = get_credits(page)
+    log(f"签到后积分: {after}")
+    dump_checkin_texts(page, "签到后")
+
+    if before is not None and after is not None and after > before:
+        return f"success|签到成功，积分 {before} → {after}（+{after - before}）"
+
+    try:
+        still = page.evaluate(PANEL_BTN_JS)
+    except Exception:
+        still = -1
+    if clicked_panel and still == 0:
+        return f"already|今日已签到（积分 {before} 未变化）"
+    if not clicked_panel and still == 0:
+        return f"already|今日已签到（未出现可点的签到按钮）"
+    return f"failed|签到未生效（积分 {before} → {after}，仍存在可点签到按钮）"
 
 
 def verify_success(page):
@@ -342,42 +378,43 @@ def main():
             else:
                 log("UI 登录未确认成功，继续尝试找签到按钮（避免因页面判断偏差直接放弃）")
 
-        # 4) 在首页 + 常见路由里找签到按钮
-        clicked = None
+        # 4) 找到带签到入口的页面并完成签到
+        outcome = None
         routes = ["", "/user", "/member", "/points", "/checkin", "/daily", "/account", "/vip"]
         for r in routes:
             try:
                 page.goto(BASE + r, timeout=20000, wait_until="domcontentloaded")
             except Exception:
                 pass
-            time.sleep(3)
-            log(f"=== 当前路由 {page.url} ===")
-            dump_checkin_texts(page, f"路由{r or '/'}")
-            clicked = find_and_click_checkin(page)
-            if clicked:
+            time.sleep(5)
+            try:
+                body = page.inner_text("body")
+            except Exception:
+                body = ""
+            log(f"=== 当前路由 {page.url} 含签到入口={'签到并领取' in body} ===")
+            if "签到并领取" not in body:
+                continue
+            outcome = find_and_click_checkin(page)
+            if outcome:
                 break
 
-        if not clicked:
+        if not outcome:
             diagnose(page, "no_button")
-            result = "❌ 没找到「签到」按钮。已保存页面截图/文本，请据此调整选择器（或把页面文本发我）。"
+            result = "❌ 没找到签到入口（页面未渲染出「签到并领取」按钮）"
+            log(result)
             send_telegram(f"MindVideo 签到失败：{result}")
             browser.close()
             print(result)
             sys.exit(1)
 
-        log(f"已点击签到元素（文案含「{clicked}」），等待结果…")
-        time.sleep(5)
-        dump_checkin_texts(page, "点击后+5s")
         log(f"捕获到的相关接口请求: {api_hits[-12:]}")
-
-        if verify_success(page):
-            result = "✅ 签到成功（检测到成功提示）"
-            log(result)
+        status, _, msg = outcome.partition("|")
+        if status in ("success", "already"):
+            result = f"✅ {msg}"
         else:
-            # 可能是「今日已签」或按钮文案未变，截个图确认
+            result = f"⚠️ {msg}"
             diagnose(page, "after_click")
-            result = "⚠️ 已点击签到，但未识别到明确的成功提示。已保存截图，请人工确认是否签到成功（可能本来就已签过）。"
-            log(result)
+        log(result)
 
         browser.close()
 
