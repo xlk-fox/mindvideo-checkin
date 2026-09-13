@@ -231,6 +231,15 @@ def get_credits(page):
         return None
 
 
+def get_checkin_days(page):
+    """读取签到面板里的「你已经签到 N 天」中的 N（用于判断本次签到是否真的生效）。"""
+    try:
+        m = re.search(r"已经签到\s*(\d+)\s*天", page.inner_text("body"))
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
 PANEL_BTN_JS = (
     "() => { const norm = s => (s||'').replace(/\\s+/g,'');"
     "return [...document.querySelectorAll('button, [class*=cursor-pointer]')]"
@@ -265,6 +274,11 @@ def find_and_click_checkin(page):
         log("未找到签到入口")
         return None
 
+    # 打开面板后先记录「已签到天数」，用于判断本次签到是否真的生效
+    time.sleep(2)
+    days_before = get_checkin_days(page)
+    log(f"打开面板后「已签到天数」: {days_before}")
+
     # ② 点面板内的「签到」按钮
     clicked_panel = False
     for i in range(8):
@@ -286,21 +300,21 @@ def find_and_click_checkin(page):
 
     time.sleep(5)
     after = get_credits(page)
-    log(f"签到后积分: {after}")
+    days_after = get_checkin_days(page)
+    log(f"签到后积分: {after}，已签到天数: {days_after}")
     dump_checkin_texts(page, "签到后")
 
     if before is not None and after is not None and after > before:
         return f"success|签到成功，积分 {before} → {after}（+{after - before}）"
-
-    try:
-        still = page.evaluate(PANEL_BTN_JS)
-    except Exception:
-        still = -1
-    if clicked_panel and still == 0:
-        return f"already|今日已签到（积分 {before} 未变化）"
-    if not clicked_panel and still == 0:
-        return f"already|今日已签到（未出现可点的签到按钮）"
-    return f"failed|签到未生效（积分 {before} → {after}，仍存在可点签到按钮）"
+    if days_before is not None and days_after is not None and days_after > days_before:
+        return f"success|签到成功，连续签到 {days_before} → {days_after} 天"
+    if not clicked_panel:
+        return "failed|未能点到签到面板内的「签到」按钮"
+    if days_before is not None and days_after is not None and days_after == days_before:
+        return f"already|今日已签到（连续签到仍为 {days_after} 天，积分 {before}）"
+    if before is not None and after is not None and after == before:
+        return f"already|今日已签到（积分保持 {before} 不变）"
+    return f"failed|签到结果未知（积分 {before} → {after}，天数 {days_before} → {days_after}）"
 
 
 def verify_success(page):
