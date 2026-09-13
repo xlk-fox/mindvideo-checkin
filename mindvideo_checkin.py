@@ -78,24 +78,17 @@ def parse_cookies(cookie_str):
 
 
 def is_logged_in(page):
-    """是否已登录：等页面渲染出登录入口或账户入口再判断，避免 React 未渲染导致的误判。"""
-    try:
-        page.wait_for_function(
-            "() => { const t = document.body ? document.body.innerText : ''; "
-            "return t.includes('免费登录') || t.includes('Sign in') || t.includes('退出') "
-            "|| t.includes('我的') || t.includes('签到'); }",
-            timeout=8000,
-        )
-    except Exception:
-        pass
+    """是否已登录：只有明确看到「登录后才有」的元素才判定已登录，否则一律当作未登录去走登录流程。"""
     try:
         txt = page.inner_text("body")
     except Exception:
         return False
     if "免费登录" in txt or "Sign in" in txt:
         return False
-    # 出现「签到」(登录后才有) 或「退出」等账户元素 → 视为已登录
-    return True
+    if "签到" in txt or "退出" in txt or "积分" in txt:
+        return True
+    # 页面文本里没有明确的登录特征（多半是没渲染出来 / 被拦）→ 保守当作未登录，强制走登录兜底
+    return False
 
 
 def try_ui_login(page, email, password):
@@ -199,7 +192,11 @@ def find_and_click_checkin(page):
                     tgt_txt = (target.inner_text(timeout=2000) or "").strip()
                 except Exception:
                     tgt_txt = ""
-                log(f"找到疑似签到元素，文案含「{kw}」，元素全文=「{tgt_txt}」")
+                try:
+                    outer = target.evaluate("el => el.outerHTML.slice(0, 240)")
+                except Exception:
+                    outer = ""
+                log(f"找到疑似签到元素，文案含「{kw}」，元素全文=「{tgt_txt}」，outerHTML={outer}")
                 ok = False
                 try:
                     target.click(timeout=6000, force=True)
@@ -293,6 +290,11 @@ def main():
         time.sleep(2)
 
         # 3) 判断登录态
+        try:
+            _head = page.inner_text("body")[:600].replace("\n", " | ")
+        except Exception as e:
+            _head = f"<取文本失败: {e}>"
+        log(f"页面诊断 URL={page.url} 文本={_head}")
         logged_in = is_logged_in(page)
         log(f"登录态判断: {'已登录' if logged_in else '未登录'}")
         if not logged_in:
