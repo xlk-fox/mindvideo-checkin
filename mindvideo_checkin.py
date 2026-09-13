@@ -26,6 +26,7 @@ except ImportError:
     sys.exit(2)
 
 BASE = "https://www.mindvideo.ai"
+SIGNIN_URL = BASE + "/zh/auth/signin/"
 
 # 签到按钮可能出现的文案（中英文都覆盖）
 CHECKIN_KEYWORDS = [
@@ -91,43 +92,76 @@ def is_logged_in(page):
     return False
 
 
-def try_ui_login(page, email, password):
+def get_token(context):
+    """登录成功后 MindVideo 会写入名为 token 的 cookie，用它判断登录是否真的成功。"""
+    try:
+        for c in context.cookies():
+            if c.get("name") == "token" and c.get("value"):
+                return c["value"]
+    except Exception:
+        pass
+    return None
+
+
+def try_ui_login(page, context, email, password):
+    """直连登录页 → 填表 → 提交。以 token cookie 是否出现作为成功判据。"""
     if not email or not password:
+        log("缺少 MV_EMAIL / MV_PASSWORD，无法 UI 登录")
         return False
-    log("尝试用账号密码 UI 登录")
-    for _ in range(2):
+    log(f"开始 UI 登录（登录前 token: {'有' if get_token(context) else '无'}）")
+    # 直接打开登录页（首页上的入口文案可能是「登录」而不是「免费登录」，找文案容易失败）
+    for url in (SIGNIN_URL, BASE):
         try:
-            page.goto(BASE, timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=12000)
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            log(f"已打开 {page.url}")
             break
         except Exception as e:
-            log(f"首页加载异常（重试）: {e}")
-            time.sleep(2)
-    time.sleep(2)
-    # 进入登录页：点「免费登录」
+            log(f"打开 {url} 异常: {e}")
+    time.sleep(4)
+    # 若页面上没有密码框，再尝试点登录入口
     try:
-        page.get_by_text("免费登录", exact=False).first.click(timeout=8000)
-        log("已点击「免费登录」")
+        if page.locator('input[type="password"]').count() == 0:
+            for label in ("免费登录", "登录", "Sign in"):
+                loc = page.get_by_text(label, exact=True).first
+                try:
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=5000)
+                        log(f"已点击「{label}」入口")
+                        time.sleep(3)
+                        break
+                except Exception:
+                    continue
     except Exception as e:
-        log(f"点击免费登录失败（可能已在登录页）: {e}")
-    time.sleep(3)
-    # 填表并提交（实测：邮箱框 accessible name=邮箱地址，密码框=密码，提交按钮文案「登 录」）
+        log(f"查找登录入口异常: {e}")
+    # 填表
     try:
-        email_box = page.get_by_label("邮箱地址", exact=False)
-        if email_box.count() == 0:
-            email_box = page.locator('input[type="email"], input[name*="email" i], input[placeholder*="邮箱" i], input[autocomplete="email"]')
-        email_box.first.fill(email, timeout=8000)
-        pwd_box = page.get_by_label("密码", exact=False)
-        if pwd_box.count() == 0:
-            pwd_box = page.locator('input[type="password"]')
-        pwd_box.first.fill(password, timeout=8000)
-        page.locator('button:has-text("登")').first.click(timeout=8000)
-        log("已提交登录表单")
+        page.locator(
+            'input[placeholder*="邮箱"], input[type="email"], input[autocomplete="email"], '
+            'input[name*="email" i], input[placeholder*="mail" i]'
+        ).first.fill(email, timeout=12000)
+        page.locator('input[type="password"]').first.fill(password, timeout=12000)
+        log("已填写账号密码")
     except Exception as e:
-        log(f"填表/提交失败: {e}")
+        log(f"填表失败: {e}")
         return False
-    time.sleep(5)
-    return is_logged_in(page)
+    # 提交
+    try:
+        page.locator('button[type="submit"], button:has-text("登")').first.click(timeout=8000)
+        log("已点击登录按钮")
+    except Exception as e:
+        log(f"点登录按钮失败，改用回车: {e}")
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            return False
+    # 等待 token 出现
+    for i in range(6):
+        time.sleep(3)
+        if get_token(context):
+            log(f"登录成功，已获取 token（第 {i + 1} 次检查）")
+            return True
+    log(f"登录后仍未拿到 token，当前 URL={page.url}")
+    return False
 
 
 def detect_cloudflare(page):
@@ -197,6 +231,9 @@ def find_and_click_checkin(page):
                 except Exception:
                     outer = ""
                 log(f"找到疑似签到元素，文案含「{kw}」，元素全文=「{tgt_txt}」，outerHTML={outer}")
+                if not tgt_txt:
+                    log("元素文本为空（多半是隐藏元素/模板文本），跳过")
+                    continue
                 ok = False
                 try:
                     target.click(timeout=6000, force=True)
@@ -298,16 +335,10 @@ def main():
         logged_in = is_logged_in(page)
         log(f"登录态判断: {'已登录' if logged_in else '未登录'}")
         if not logged_in:
-            if try_ui_login(page, email, password):
-                logged_in = True
+            if try_ui_login(page, context, email, password):
                 log("UI 登录成功")
             else:
-                diagnose(page, "not_logged_in")
-                result = "❌ 未登录，且无可用的账号密码兜底。请检查 MV_COOKIE 是否有效，或补充 MV_EMAIL/MV_PASSWORD。"
-                send_telegram(f"MindVideo 签到失败：{result}")
-                browser.close()
-                print(result)
-                sys.exit(1)
+                log("UI 登录未确认成功，继续尝试找签到按钮（避免因页面判断偏差直接放弃）")
 
         # 4) 在首页 + 常见路由里找签到按钮
         clicked = None
